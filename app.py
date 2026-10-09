@@ -106,6 +106,58 @@ def get_tgt_se(clone_id):
     return _tgt_se_cache[clone_id]
 
 
+# Punjabi: no free local Piper voice exists (checked rhasspy/piper-voices and the open community
+# repos on HF). Meta's MMS-TTS (facebook/mms-tts-pan) fills the gap - free, VITS-based like Piper,
+# runs fully local with no API/key/cost. License is CC-BY-NC 4.0 (non-commercial) - fine for this
+# app as long as GATE_ENABLED stays off; flag this again if the payment gate is ever turned on.
+MMS_MODELS = {"pa_IN-mms-medium": "facebook/mms-tts-pan"}
+_mms_cache = {}
+
+
+def get_mms(name):
+    if name not in _mms_cache:
+        import torch
+        from transformers import VitsModel, AutoTokenizer
+        from huggingface_hub import hf_hub_download
+        repo = MMS_MODELS[name]
+        model = VitsModel.from_pretrained(repo)
+        tokenizer = AutoTokenizer.from_pretrained(repo)
+        # This torch version's weight_norm uses the new parametrizations.weight.original0/1 naming,
+        # but the published checkpoint uses the old weight_g/weight_v naming - remap or most of the
+        # flow/posterior_encoder weights silently fail to load (confirmed: 0 missing/unexpected after this).
+        path = hf_hub_download(repo, "pytorch_model.bin")
+        sd = torch.load(path, map_location="cpu")
+        new_sd = {}
+        for k, v in sd.items():
+            if k.endswith(".weight_g"):
+                new_sd[k[:-len("weight_g")] + "parametrizations.weight.original0"] = v
+            elif k.endswith(".weight_v"):
+                new_sd[k[:-len("weight_v")] + "parametrizations.weight.original1"] = v
+            else:
+                new_sd[k] = v
+        model.load_state_dict(new_sd, strict=False)
+        model.eval()
+        _mms_cache[name] = (model, tokenizer)
+    return _mms_cache[name]
+
+
+def mms_speak(name, text):
+    import torch
+    model, tokenizer = get_mms(name)
+    inputs = tokenizer(text, return_tensors="pt")
+    with torch.no_grad():
+        waveform = model(**inputs).waveform
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(model.config.sampling_rate)
+        pcm = (waveform.squeeze().clamp(-1, 1).numpy() * 32767).astype("int16")
+        wf.writeframes(pcm.tobytes())
+    buf.seek(0)
+    return buf
+
+
 def voices():
     out = []
     for f in sorted(os.listdir(VOICE_DIR)):
@@ -113,6 +165,9 @@ def voices():
             name = f[:-5]
             lang, speaker = name.split("-")[0], name.split("-")[1]
             out.append({"name": name, "lang": lang, "speaker": speaker.replace("_", " ").title()})
+    for name in MMS_MODELS:
+        lang = name.split("-")[0]
+        out.append({"name": name, "lang": lang, "speaker": "MMS (Meta, free, non-commercial)"})
     return out
 
 
@@ -382,12 +437,18 @@ def api_speak():
         return jsonify(error="free_limit", message=f"You've used your {FREE_USES} free generations. "
                        f"Register and pay ₹{PRICE_PAISE // 100} to keep going."), 402
 
-    buf = io.BytesIO()
-    # Piper's medium models default to a rushed cadence; PIPER_SLOWDOWN pulls the baseline back to natural speech.
-    length_scale = max(0.5, min(2.0, PIPER_SLOWDOWN / speed))
-    with wave.open(buf, "wb") as wf:
-        get_voice(name).synthesize_wav(text, wf, syn_config=SynthesisConfig(length_scale=length_scale))
-    buf.seek(0)
+    if name in MMS_MODELS:
+        try:
+            buf = mms_speak(name, text)
+        except Exception as e:
+            return jsonify(error=f"MMS synthesis failed: {e}"), 502
+    else:
+        buf = io.BytesIO()
+        # Piper's medium models default to a rushed cadence; PIPER_SLOWDOWN pulls the baseline back to natural speech.
+        length_scale = max(0.5, min(2.0, PIPER_SLOWDOWN / speed))
+        with wave.open(buf, "wb") as wf:
+            get_voice(name).synthesize_wav(text, wf, syn_config=SynthesisConfig(length_scale=length_scale))
+        buf.seek(0)
 
     def record_use():
         if u:
@@ -577,8 +638,9 @@ INDEX_HTML = """<!doctype html>
       <div id="libraryList" class="divide-y divide-claude-border dark:divide-claude-darkBorder"></div>
     </div>
     <div class="text-sm text-claude-subtext dark:text-claude-darkSubtext">
-      Don't see your language? No official Piper voice exists yet for Assamese or Punjabi —
-      <a href="https://colab.research.google.com/github/pranjalgeocreate-collab/locally-tts/blob/main/training/train_assamese_piper.ipynb" target="_blank" class="text-terracotta-600 underline">train an Assamese voice yourself on Colab (free)</a>.
+      Don't see your language? No free local Piper voice exists yet for Assamese —
+      <a href="https://colab.research.google.com/github/pranjalgeocreate-collab/locally-tts/blob/main/training/train_assamese_piper.ipynb" target="_blank" class="text-terracotta-600 underline">train one yourself on Colab (free)</a>.
+      Punjabi uses Meta's MMS model instead of Piper — free, local, but non-commercial licensed.
     </div>
   </div>
 
@@ -784,7 +846,7 @@ showTab('speak');
 // ---------- voices ----------
 let voiceList = [];
 const LANG_NAMES = {
-  en: 'English', hi: 'Hindi', mr: 'Marathi', bn: 'Bengali', te: 'Telugu', ur: 'Urdu', ml: 'Malayalam', ne: 'Nepali', ta: 'Tamil',
+  en: 'English', hi: 'Hindi', mr: 'Marathi', bn: 'Bengali', te: 'Telugu', ur: 'Urdu', ml: 'Malayalam', ne: 'Nepali', ta: 'Tamil', pa: 'Punjabi',
   ar: 'Arabic', bg: 'Bulgarian', ca: 'Catalan', cs: 'Czech', cy: 'Welsh', da: 'Danish', de: 'German', el: 'Greek',
   es: 'Spanish', et: 'Estonian', eu: 'Basque', fa: 'Persian', fi: 'Finnish', fr: 'French', he: 'Hebrew',
   hu: 'Hungarian', hy: 'Armenian', id: 'Indonesian', is: 'Icelandic', it: 'Italian', ja: 'Japanese',
@@ -796,7 +858,7 @@ const LANG_NAMES = {
 const SAMPLE_TEXT = {
   en: 'This is a preview of this voice.', hi: 'यह आवाज़ का एक नमूना है।', mr: 'ही आवाजाची एक झलक आहे.',
   bn: 'এটি এই কণ্ঠের একটি নমুনা।', te: 'ఇది ఈ వాయిస్ యొక్క నమూనా.', ur: 'یہ اس آواز کا نمونہ ہے۔',
-  ml: 'ഇത് ഈ ശബ്ദത്തിന്റെ ഒരു സാമ്പിൾ ആണ്.', ne: 'यो यो आवाजको नमूना हो।', ta: 'இது இந்த குரலின் மாதிரி.',
+  ml: 'ഇത് ഈ ശബ്ദത്തിന്റെ ഒരു സാമ്പിൾ ആണ്.', ne: 'यो यो आवाजको नमूना हो।', ta: 'இது இந்த குரலின் மாதிரி.', pa: 'ਇਹ ਇਸ ਆਵਾਜ਼ ਦਾ ਨਮੂਨਾ ਹੈ।',
 };
 function langsSorted(list) {
   return [...new Set(list.map(v => v.baseLang))].sort((a, b) => (LANG_NAMES[a] || a).localeCompare(LANG_NAMES[b] || b));
