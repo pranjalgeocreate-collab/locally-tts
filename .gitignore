@@ -11,11 +11,13 @@ app.pid
 voices/*.onnx
 voices/*.onnx.json
 openvoice_ckpt/
+wav2lip_model/
 
-# Private data - never commit real user info or voice clones
+# Private data - never commit real user info, voice clones, or uploaded photos/videos
 users.json
 clones/*
 !clones/.gitkeep
+lipsync_jobs/
 
 # OS
 .DS_Store

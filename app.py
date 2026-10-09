@@ -486,6 +486,108 @@ def api_speak():
     return send_file(io.BytesIO(out_bytes), mimetype="audio/wav", download_name="speech.wav")
 
 
+# ---------- talking avatar: local CPU lip-sync (Wav2Lip ONNX) ----------
+LIPSYNC_DIR = os.path.join(HERE, "lipsync_jobs")
+os.makedirs(LIPSYNC_DIR, exist_ok=True)
+_lipsync_jobs = {}
+_lipsync_lock = threading.Lock()
+
+
+def run_lipsync_job(job_id, image_path, text, voice_name, speed, clone_id):
+    def set_status(**kwargs):
+        with _lipsync_lock:
+            _lipsync_jobs[job_id].update(kwargs)
+
+    try:
+        set_status(status="generating voice")
+        if voice_name in MMS_MODELS:
+            buf = mms_speak(voice_name, text)
+        else:
+            buf = io.BytesIO()
+            length_scale = max(0.5, min(2.0, PIPER_SLOWDOWN / speed))
+            with wave.open(buf, "wb") as wf:
+                get_voice(voice_name).synthesize_wav(text, wf, syn_config=SynthesisConfig(length_scale=length_scale))
+            buf.seek(0)
+
+        if clone_id:
+            if _converter is None:
+                raise RuntimeError("voice cloning engine is still warming up, try again in a bit")
+            tgt_se = get_tgt_se(clone_id)
+            if tgt_se is None:
+                raise ValueError("unknown cloned voice")
+            with tempfile.TemporaryDirectory() as tmp2:
+                src_path = os.path.join(tmp2, "src.wav")
+                out_path = os.path.join(tmp2, "out.wav")
+                with open(src_path, "wb") as f:
+                    f.write(buf.getvalue())
+                src_se = _converter.extract_se(src_path)
+                _converter.convert(src_path, src_se, tgt_se, output_path=out_path)
+                with open(out_path, "rb") as f:
+                    audio_bytes = f.read()
+        else:
+            audio_bytes = buf.getvalue()
+
+        job_dir = os.path.dirname(image_path)
+        audio_path = os.path.join(job_dir, "audio.wav")
+        with open(audio_path, "wb") as f:
+            f.write(audio_bytes)
+
+        set_status(status="animating", progress=[0, 0])
+
+        def progress(done, total):
+            set_status(progress=[done, total])
+
+        import wav2lip_engine
+        output_path = os.path.join(job_dir, "output.mp4")
+        wav2lip_engine.generate(image_path, audio_path, output_path, progress_cb=progress)
+        set_status(status="done", video_path=output_path)
+    except Exception as e:
+        set_status(status="error", error=str(e))
+
+
+@app.post("/api/lipsync")
+def api_lipsync_start():
+    text = (request.form.get("text") or "").strip()[:500]
+    voice_name = request.form.get("voice") or ""
+    speed = float(request.form.get("speed") or 1.0)
+    clone_id = request.form.get("clone_id") or ""
+    image_file = request.files.get("image")
+    if not text or not image_file:
+        return jsonify(error="need a photo and some text"), 400
+    if voice_name not in {v["name"] for v in voices()}:
+        return jsonify(error="unknown voice"), 400
+
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = os.path.join(LIPSYNC_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    image_path = os.path.join(job_dir, "photo" + (os.path.splitext(image_file.filename or "")[1] or ".jpg"))
+    image_file.save(image_path)
+
+    with _lipsync_lock:
+        _lipsync_jobs[job_id] = {"status": "queued", "progress": [0, 0], "error": None, "video_path": None}
+    threading.Thread(target=run_lipsync_job, args=(job_id, image_path, text, voice_name, speed, clone_id),
+                      daemon=True).start()
+    return jsonify(job_id=job_id)
+
+
+@app.get("/api/lipsync/<job_id>")
+def api_lipsync_status(job_id):
+    with _lipsync_lock:
+        job = _lipsync_jobs.get(job_id)
+    if not job:
+        return jsonify(error="unknown job"), 404
+    return jsonify(status=job["status"], progress=job["progress"], error=job["error"], ready=job["status"] == "done")
+
+
+@app.get("/api/lipsync/<job_id>/video")
+def api_lipsync_video(job_id):
+    with _lipsync_lock:
+        job = _lipsync_jobs.get(job_id)
+    if not job or job["status"] != "done":
+        return jsonify(error="not ready"), 404
+    return send_file(job["video_path"], mimetype="video/mp4")
+
+
 INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -555,6 +657,7 @@ INDEX_HTML = """<!doctype html>
     <button data-tab="clone" class="tabbtn px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors hover:text-claude-text dark:hover:text-claude-darkText">Clone a Voice</button>
     <button data-tab="dialogue" class="tabbtn px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors hover:text-claude-text dark:hover:text-claude-darkText">Dialogue</button>
     <button data-tab="library" class="tabbtn px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors hover:text-claude-text dark:hover:text-claude-darkText">Library</button>
+    <button data-tab="avatar" class="tabbtn px-4 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors hover:text-claude-text dark:hover:text-claude-darkText">Talking Avatar</button>
   </div>
 
   <div id="panel-speak" class="tabpanel space-y-4">
@@ -649,6 +752,34 @@ INDEX_HTML = """<!doctype html>
       Don't see your language? No free local Piper voice exists yet for Assamese —
       <a href="https://colab.research.google.com/github/pranjalgeocreate-collab/locally-tts/blob/main/training/train_assamese_piper.ipynb" target="_blank" class="text-terracotta-600 underline">train one yourself on Colab (free)</a>.
       Punjabi, Gujarati, Kannada and Odia use Meta's MMS model instead of Piper — free, local, but non-commercial licensed.
+    </div>
+  </div>
+
+  <div id="panel-avatar" class="tabpanel hidden space-y-4">
+    <div class="bg-claude-card dark:bg-claude-darkCard border border-claude-border dark:border-claude-darkBorder rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow space-y-4">
+      <div class="font-serif text-lg">Talking avatar</div>
+      <p class="text-sm text-claude-subtext dark:text-claude-darkSubtext">Upload a clear, front-facing photo and type something — Locally generates the voice, then animates just the mouth to lip-sync it. Runs fully local on CPU, so it's slow: roughly 15-60 seconds depending on length.</p>
+      <div class="flex flex-wrap gap-3 items-center">
+        <input type="file" id="avatarPhoto" accept="image/*" class="text-sm">
+        <img id="avatarPreview" class="hidden h-16 w-16 object-cover rounded-lg border border-claude-border dark:border-claude-darkBorder">
+      </div>
+      <textarea id="avatarText" rows="3" placeholder="What should they say?" class="w-full rounded-xl border border-claude-border dark:border-claude-darkBorder bg-claude-bg dark:bg-claude-darkBg px-3 py-2.5 text-[15px] resize-y focus:outline-none focus:ring-2 focus:ring-terracotta-500/40">Hello! This is Locally's talking avatar.</textarea>
+      <div class="flex flex-nowrap gap-3 items-center text-sm overflow-x-auto">
+        <label class="flex items-center gap-2 text-claude-subtext dark:text-claude-darkSubtext flex-shrink-0">Language
+          <select id="avatarLang" class="rounded-lg border border-claude-border dark:border-claude-darkBorder bg-claude-bg dark:bg-claude-darkBg px-2 py-1.5"></select>
+        </label>
+        <select id="avatarVoice" class="rounded-lg border border-claude-border dark:border-claude-darkBorder bg-claude-bg dark:bg-claude-darkBg px-2 py-1.5 flex-shrink-0"></select>
+        <label class="flex items-center gap-2 text-claude-subtext dark:text-claude-darkSubtext flex-shrink-0">Cloned voice
+          <select id="avatarClone" class="rounded-lg border border-claude-border dark:border-claude-darkBorder bg-claude-bg dark:bg-claude-darkBg px-2 py-1.5"><option value="">None</option></select>
+        </label>
+      </div>
+      <div class="flex items-center gap-3">
+        <button id="avatarGenerate" class="bg-terracotta-500 hover:bg-terracotta-600 text-white font-medium shadow-sm hover:shadow-md hover:-translate-y-px active:translate-y-0 transition-all px-5 py-2.5 rounded-xl text-sm">Generate video</button>
+        <span id="avatarStatus" class="text-sm text-claude-subtext dark:text-claude-darkSubtext"></span>
+        <span id="avatarErr" class="text-red-600 text-sm"></span>
+      </div>
+      <video id="avatarVideo" controls class="w-full rounded-lg hidden"></video>
+      <a id="avatarDownload" href="#" download="talking-avatar.mp4" class="hidden text-terracotta-600 text-sm underline">Download video</a>
     </div>
   </div>
 
@@ -885,8 +1016,17 @@ async function loadVoices() {
   $('lang').value = langs.includes('en') ? 'en' : langs[0];
   populateVoicesForLang($('lang').value);
   renderLibrary();
+
+  $('avatarLang').innerHTML = $('lang').innerHTML;
+  $('avatarLang').value = $('lang').value;
+  populateAvatarVoicesForLang($('avatarLang').value);
 }
 $('lang').addEventListener('change', () => populateVoicesForLang($('lang').value));
+function populateAvatarVoicesForLang(lang) {
+  const opt = v => `<option value="${v.name}">${v.speaker}</option>`;
+  $('avatarVoice').innerHTML = voiceList.filter(v => v.baseLang === lang).map(opt).join('');
+}
+$('avatarLang').addEventListener('change', () => populateAvatarVoicesForLang($('avatarLang').value));
 $('speed').addEventListener('input', () => $('speedval').textContent = parseFloat($('speed').value).toFixed(1) + 'x');
 
 const TEXT_MAX = 2000;
@@ -921,6 +1061,11 @@ async function loadClones() {
   });
   renderLibrary();
   if (!d.ready) setTimeout(loadClones, 5000);
+
+  const avatarPrev = $('avatarClone').value;
+  $('avatarClone').innerHTML = '<option value="">None</option>' +
+    cloneList.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+  if (cloneList.some(c => c.id === avatarPrev)) $('avatarClone').value = avatarPrev;
 }
 
 // ---------- recording (shared by Clone tab) ----------
@@ -1236,6 +1381,66 @@ function renderLibrary() {
   $('libraryList').querySelectorAll('[data-prev]').forEach(btn => btn.onclick = () => rows[parseInt(btn.dataset.prev)].preview());
 }
 $('librarySearch').addEventListener('input', renderLibrary);
+
+// ---------- talking avatar ----------
+$('avatarPhoto').addEventListener('change', () => {
+  const file = $('avatarPhoto').files[0];
+  if (!file) { $('avatarPreview').classList.add('hidden'); return; }
+  $('avatarPreview').src = URL.createObjectURL(file);
+  $('avatarPreview').classList.remove('hidden');
+});
+
+async function pollLipsync(jobId) {
+  while (true) {
+    const r = await fetch('/api/lipsync/' + jobId);
+    const d = await r.json();
+    if (d.error && !d.status) { $('avatarErr').textContent = d.error; return; }
+    if (d.status === 'error') { $('avatarErr').textContent = d.error || 'failed'; return; }
+    if (d.status === 'done') {
+      $('avatarStatus').textContent = 'Done.';
+      const url = '/api/lipsync/' + jobId + '/video';
+      $('avatarVideo').src = url;
+      $('avatarVideo').classList.remove('hidden');
+      $('avatarVideo').play();
+      $('avatarDownload').href = url;
+      $('avatarDownload').classList.remove('hidden');
+      return;
+    }
+    const progress = d.progress && d.progress[1] ? ` (${d.progress[0]}/${d.progress[1]} frames)` : '';
+    $('avatarStatus').textContent = (d.status || 'working') + progress + '…';
+    await new Promise(res => setTimeout(res, 1500));
+  }
+}
+
+$('avatarGenerate').addEventListener('click', async () => {
+  $('avatarErr').textContent = '';
+  $('avatarVideo').classList.add('hidden');
+  $('avatarDownload').classList.add('hidden');
+  const photo = $('avatarPhoto').files[0];
+  const text = $('avatarText').value.trim();
+  if (!photo) { $('avatarErr').textContent = 'add a photo first'; return; }
+  if (!text) { $('avatarErr').textContent = 'type something for them to say'; return; }
+  $('avatarGenerate').disabled = true;
+  $('avatarStatus').textContent = 'Starting…';
+  setAgentWorking(true, 'Locally agent animating avatar…');
+  try {
+    const fd = new FormData();
+    fd.append('image', photo);
+    fd.append('text', text);
+    fd.append('voice', $('avatarVoice').value);
+    fd.append('speed', '1.0');
+    fd.append('clone_id', $('avatarClone').value);
+    const r = await fetch('/api/lipsync', {method: 'POST', body: fd});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'failed to start');
+    await pollLipsync(d.job_id);
+  } catch (e) {
+    $('avatarErr').textContent = e.message;
+  } finally {
+    $('avatarGenerate').disabled = false;
+    setAgentWorking(false);
+  }
+});
 
 loadVoices();
 loadClones();
