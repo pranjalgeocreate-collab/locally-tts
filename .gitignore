@@ -1,0 +1,21 @@
+# Python env
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime artifacts
+app.log
+app.pid
+
+# Large model files - download separately, see setup.sh
+voices/*.onnx
+voices/*.onnx.json
+openvoice_ckpt/
+
+# Private data - never commit real user info or voice clones
+users.json
+clones/*
+!clones/.gitkeep
+
+# OS
+.DS_Store
