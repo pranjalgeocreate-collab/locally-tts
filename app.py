@@ -106,11 +106,17 @@ def get_tgt_se(clone_id):
     return _tgt_se_cache[clone_id]
 
 
-# Punjabi: no free local Piper voice exists (checked rhasspy/piper-voices and the open community
-# repos on HF). Meta's MMS-TTS (facebook/mms-tts-pan) fills the gap - free, VITS-based like Piper,
-# runs fully local with no API/key/cost. License is CC-BY-NC 4.0 (non-commercial) - fine for this
-# app as long as GATE_ENABLED stays off; flag this again if the payment gate is ever turned on.
-MMS_MODELS = {"pa_IN-mms-medium": "facebook/mms-tts-pan"}
+# Punjabi, Gujarati, Kannada, Odia: no free local Piper voice exists for any of these (checked
+# rhasspy/piper-voices and the open community repos on HF). Meta's MMS-TTS fills the gap - free,
+# VITS-based like Piper, runs fully local with no API/key/cost. License is CC-BY-NC 4.0
+# (non-commercial) - fine for this app as long as GATE_ENABLED stays off; flag this again if the
+# payment gate is ever turned on.
+MMS_MODELS = {
+    "pa_IN-mms-medium": "facebook/mms-tts-pan",
+    "gu_IN-mms-medium": "facebook/mms-tts-guj",
+    "kn_IN-mms-medium": "facebook/mms-tts-kan",
+    "or_IN-mms-medium": "facebook/mms-tts-ory",
+}
 _mms_cache = {}
 
 
@@ -145,6 +151,8 @@ def mms_speak(name, text):
     import torch
     model, tokenizer = get_mms(name)
     inputs = tokenizer(text, return_tensors="pt")
+    if inputs["input_ids"].numel() == 0:
+        raise ValueError("none of that text is in this voice's script/alphabet")
     with torch.no_grad():
         waveform = model(**inputs).waveform
     buf = io.BytesIO()
@@ -640,7 +648,7 @@ INDEX_HTML = """<!doctype html>
     <div class="text-sm text-claude-subtext dark:text-claude-darkSubtext">
       Don't see your language? No free local Piper voice exists yet for Assamese —
       <a href="https://colab.research.google.com/github/pranjalgeocreate-collab/locally-tts/blob/main/training/train_assamese_piper.ipynb" target="_blank" class="text-terracotta-600 underline">train one yourself on Colab (free)</a>.
-      Punjabi uses Meta's MMS model instead of Piper — free, local, but non-commercial licensed.
+      Punjabi, Gujarati, Kannada and Odia use Meta's MMS model instead of Piper — free, local, but non-commercial licensed.
     </div>
   </div>
 
@@ -846,7 +854,7 @@ showTab('speak');
 // ---------- voices ----------
 let voiceList = [];
 const LANG_NAMES = {
-  en: 'English', hi: 'Hindi', mr: 'Marathi', bn: 'Bengali', te: 'Telugu', ur: 'Urdu', ml: 'Malayalam', ne: 'Nepali', ta: 'Tamil', pa: 'Punjabi',
+  en: 'English', hi: 'Hindi', mr: 'Marathi', bn: 'Bengali', te: 'Telugu', ur: 'Urdu', ml: 'Malayalam', ne: 'Nepali', ta: 'Tamil', pa: 'Punjabi', gu: 'Gujarati', kn: 'Kannada', or: 'Odia',
   ar: 'Arabic', bg: 'Bulgarian', ca: 'Catalan', cs: 'Czech', cy: 'Welsh', da: 'Danish', de: 'German', el: 'Greek',
   es: 'Spanish', et: 'Estonian', eu: 'Basque', fa: 'Persian', fi: 'Finnish', fr: 'French', he: 'Hebrew',
   hu: 'Hungarian', hy: 'Armenian', id: 'Indonesian', is: 'Icelandic', it: 'Italian', ja: 'Japanese',
@@ -859,6 +867,7 @@ const SAMPLE_TEXT = {
   en: 'This is a preview of this voice.', hi: 'यह आवाज़ का एक नमूना है।', mr: 'ही आवाजाची एक झलक आहे.',
   bn: 'এটি এই কণ্ঠের একটি নমুনা।', te: 'ఇది ఈ వాయిస్ యొక్క నమూనా.', ur: 'یہ اس آواز کا نمونہ ہے۔',
   ml: 'ഇത് ഈ ശബ്ദത്തിന്റെ ഒരു സാമ്പിൾ ആണ്.', ne: 'यो यो आवाजको नमूना हो।', ta: 'இது இந்த குரலின் மாதிரி.', pa: 'ਇਹ ਇਸ ਆਵਾਜ਼ ਦਾ ਨਮੂਨਾ ਹੈ।',
+  gu: 'આ આ અવાજનો એક નમૂનો છે.', kn: 'ಇದು ಈ ಧ್ವನಿಯ ಒಂದು ಮಾದರಿ.', or: 'ଏହା ଏହି ସ୍ୱରର ଏକ ନମୁନା।',
 };
 function langsSorted(list) {
   return [...new Set(list.map(v => v.baseLang))].sort((a, b) => (LANG_NAMES[a] || a).localeCompare(LANG_NAMES[b] || b));
