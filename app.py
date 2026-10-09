@@ -576,6 +576,10 @@ INDEX_HTML = """<!doctype html>
       <input id="librarySearch" placeholder="Search voices by name or language…" class="w-full rounded-lg border border-claude-border dark:border-claude-darkBorder bg-claude-bg dark:bg-claude-darkBg px-3 py-2 text-sm">
       <div id="libraryList" class="divide-y divide-claude-border dark:divide-claude-darkBorder"></div>
     </div>
+    <div class="text-sm text-claude-subtext dark:text-claude-darkSubtext">
+      Don't see your language? No official Piper voice exists yet for Assamese or Punjabi —
+      <a href="https://colab.research.google.com/github/pranjalgeocreate-collab/locally-tts/blob/main/training/train_assamese_piper.ipynb" target="_blank" class="text-terracotta-600 underline">train an Assamese voice yourself on Colab (free)</a>.
+    </div>
   </div>
 
 </div>
@@ -780,7 +784,7 @@ showTab('speak');
 // ---------- voices ----------
 let voiceList = [];
 const LANG_NAMES = {
-  en: 'English', hi: 'Hindi', mr: 'Marathi', bn: 'Bengali', te: 'Telugu', ur: 'Urdu', ml: 'Malayalam', ne: 'Nepali',
+  en: 'English', hi: 'Hindi', mr: 'Marathi', bn: 'Bengali', te: 'Telugu', ur: 'Urdu', ml: 'Malayalam', ne: 'Nepali', ta: 'Tamil',
   ar: 'Arabic', bg: 'Bulgarian', ca: 'Catalan', cs: 'Czech', cy: 'Welsh', da: 'Danish', de: 'German', el: 'Greek',
   es: 'Spanish', et: 'Estonian', eu: 'Basque', fa: 'Persian', fi: 'Finnish', fr: 'French', he: 'Hebrew',
   hu: 'Hungarian', hy: 'Armenian', id: 'Indonesian', is: 'Icelandic', it: 'Italian', ja: 'Japanese',
@@ -792,7 +796,7 @@ const LANG_NAMES = {
 const SAMPLE_TEXT = {
   en: 'This is a preview of this voice.', hi: 'यह आवाज़ का एक नमूना है।', mr: 'ही आवाजाची एक झलक आहे.',
   bn: 'এটি এই কণ্ঠের একটি নমুনা।', te: 'ఇది ఈ వాయిస్ యొక్క నమూనా.', ur: 'یہ اس آواز کا نمونہ ہے۔',
-  ml: 'ഇത് ഈ ശബ്ദത്തിന്റെ ഒരു സാമ്പിൾ ആണ്.', ne: 'यो यो आवाजको नमूना हो।',
+  ml: 'ഇത് ഈ ശബ്ദത്തിന്റെ ഒരു സാമ്പിൾ ആണ്.', ne: 'यो यो आवाजको नमूना हो।', ta: 'இது இந்த குரலின் மாதிரி.',
 };
 function langsSorted(list) {
   return [...new Set(list.map(v => v.baseLang))].sort((a, b) => (LANG_NAMES[a] || a).localeCompare(LANG_NAMES[b] || b));
